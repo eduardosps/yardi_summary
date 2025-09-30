@@ -32,22 +32,22 @@ Paste this Mermaid into Mermaid Live (or Miro w/ plug-in) to render.
 ```mermaid
 flowchart LR
   subgraph Sources
-    PG[(Postgres)]
-    HOT[(Hott Solutions CDC)]
-    YAPI[(Yardi API
-Pet Fee Endpoints)]
+    PG[(PetScreening
+Postgres)]
+    HOT[(Hott Solutions
+AWS container)]
+    YAPI[(Yardi)]
   end
 
   subgraph Ingestion
     AB[Airbyte Connectors]
-    SP[Snowflake SP for Pet Fees]
+    SP[Snowflake Stored Procedure]
   end
 
-  subgraph Warehouse
+  subgraph Data Warehouse
     RAW[(Snowflake RAW)]
-    STG[(dbt STAGING
-1:1 replicas)]
-    CORE[(dbt CORE/MARTS)]
+    STG[(dbt Models
+Staging, Core, Reporting)]
   end
 
   subgraph Activation
@@ -56,31 +56,33 @@ Pet Fee Endpoints)]
     RPT[PM Reports/Dashboards]
   end
 
+  YAPI --> PG
+  
   PG --> AB --> RAW
   HOT --> AB --> RAW
   YAPI --> SP --> RAW
 
-  RAW --> STG --> CORE --> HT
-  CORE --> PMEM
-  CORE --> RPT
+  RAW --> STG --> HT
+  STG --> PMEM
+  STG --> RPT
 ```
-**Narrative:** Postgres + Hott enter via **Airbyte** to Snowflake **RAW**. Yardi **pet fee** data enters via a **Snowflake stored procedure** (SP). dbt creates **1:1 staging** and then **core/marts** for activation/reporting.
+**Narrative:** Old process: Yardi data enters Petscreening application via existing integration, data then leveraged in data warehouse layer. New additions: Hott data enters Snowflake **RAW** via **Airbyte**; Yardi data enters via a **Snowflake stored procedure** calling various API endpoints (residents + pet fees). dbt creates **1:1 staging** (bronze layer models) and then incorporates into **core/marts** (silver and gold layer models) for activation/reporting.
 
 ---
 
 ## 3) Data Sources (what & why)
-### 3.1 Postgres (App DB)
+### 3.1 Postgres (PetScreening App DB)
 - **Tables used (primary):** `users`, `leases`, `units`, `properties`, `property_managers`, `user_access` (names may vary; use actual schema names in screenshots).
 - **Strengths:** Near‑real‑time app truth for user/properties; rich user keys.
-- **Gaps:** Occasional **missing move_out_date** or delayed updates.
+- **Gaps:** Occasional **missing move_out_date** from yardi integration; no CDC.
 
 ### 3.2 Hott Solutions (CDC with deletes)
 - **Feeds:** Similar entities as our core(common) Snowflake layer — users, leases, units, properties, lease_user_access, parent_companies.
 - **Value:** **Reliable move_out_date**, explicit **deletes** via CDC streams.
-- **Rule:** If Postgres **move_out_date is NULL**, **use Hott’s** value.
+- **Rule:** Incorporate into early silver layer `f_leases` table; if Postgres **move_out_date is NULL**, **use Hott’s** value.
 
 ### 3.3 Yardi API (Resident endpoints)
-- **Purpose:** Determine current residents in Yardi, utilize to augment PS resident data.
+- **Purpose:** Determine current residents in Yardi, utilize to augment/correct PS resident data in Snowflake.
 - **Mechanism:** **Snowflake Stored Procedure** (Nick) fetches and writes into Snowflake weekly (single table with primary residents + secondary occupants).
 - **Optimization need:** Improve SP runtime; Yardi SOAP API takes a long time to request.
 
@@ -107,8 +109,43 @@ Pet Fee Endpoints)]
 ---
 
 ## 5) Warehouse Model Strategy (dbt)
-**Schemas:** `staging` (1:1), `common` (business logic), `hightouch/reporting` (activation/reporting).  
-**Naming:** `stg_source__table`, `f__* or d_*`, `ht_*, or r__*` (align to our conventions).
+**Strategy:** Medallion approach (bronze-silver-gold) for data modelling. Raw data is first formatted in bronze layer (staging models). Silver layer for more meaningful transformations, calculations, and joins. Gold layer (reporting/hightouch models) for business-ready data.  
+**Schemas:** `staging` (bronze layer); `common`, `petscreening` (silver layer); `hightouch`, `reporting` (gold layer).  
+**Naming:** `stg_source__table` (staging tables named by source), `f__* or d_*` (common "facts" and "dimensions" tables), `ht_*, or r__*` (hightouch and reporting tables).
+
+```mermaid
+flowchart LR
+  subgraph Bronze Layer
+    SPS[PS Staging
+users, leases, etc.]
+    SH[HOTT Staging
+users, leases, etc.]
+    SY[Yardi API Staging
+residents, pet fees]
+  end
+
+  subgraph Silver Layer
+    CO[Common
+various models]
+    MA[Master Bridge
+links users to properties]
+  end
+
+  subgraph Gold Layer
+    HT[Hightouch]
+    RE[Reporting]
+  end
+
+  SPS --> CO
+  SH --> CO
+  SY --> CO
+
+  CO --> MA
+
+  MA --> HT
+  MA --> RE
+```
+**Narrative:** Basic data model structure in DBT. All sources have an initial bronze layer staging model. The silver layer contains most logic. Various silver layer models culminate in the master bridge model, linking users and properties via various sources. Finally, the master bridge is referenced in the gold layer models.
 
 ### 5.1 Staging (1:1 replicas)
 - **Targets:** `_airbyte_data` JSON → typed columns.  
@@ -187,16 +224,16 @@ select * from bridge;
 ### 6.2 Decision Flow (Mermaid)
 ```mermaid
 flowchart TD
-  A[Resident at Yardi Property] --> B{{Has PetScreening profile?}}
+  A[Resident at Yardi Property] --> B{{Has PetScreening profile}}
   B -- Yes --> X[No action]
-  B -- No --> C{{Property live >= 7 days?}}
+  B -- No --> C{{Property live >= 7 days}}
   C -- No --> X
   C -- Yes --> D[Enter Non-Compliance Flow]
-  D --> E{{Email count < 31?}}
-  E -- Yes --> F["Send next email<br/>(Non-Compliance cadence)"]
-  E -- No --> G["Responsibility Email to PM<br/>(stop resident emails)"]
-  D --> H{{Pays Pet Fees? (Yardi API)}}
-  H -- Yes & No Profile --> I[Send Pet Fee Nudge]
+  D --> E{{Email count < 31}}
+  E -- Yes --> F["Send next email<br/>Non-Compliance cadence"]
+  E -- No --> G["Responsibility Email to PM<br/>stop resident emails"]
+  D --> H{{Pays Pet Fees via Yardi API}}
+  H -- Yes and No Profile --> I[Send Pet Fee Nudge]
 ```
 
 ### 6.3 Hightouch / Send engine
@@ -343,3 +380,44 @@ where provider = 'yardi'
 - Grab the screenshots on the shot list and drop into the deck/Miro.  
 - Decide lease‑reset rule for 31‑cap; implement & test.  
 - Schedule SP improvements and document cron for all jobs.
+
+---
+
+## 19) Next PMC Integrations Roadmap
+
+After completing the Yardi integration, the following Property Management Companies (PMCs) are prioritized for integration. Each PMC offers different API endpoints that require their own code to accomodate.
+
+### 19.1 PMC Integration Status
+
+| PMC | API Endpoints | Status |
+|-----|---------------|--------|
+| **Entrata** | GetLeases | ☐ |
+| | GetPropertyFees | ☐ | |
+| **AppFolio** | GetTenants | ☑ |
+| | charges | ☑ | |
+| **RealPage** | GetTenants | 🔄 |
+| | GetScheduledCharges | 🔄 | |
+| | petfees | 🔄 | |
+| **Buildium** | TBD | ☐ |
+
+### 19.2 Success Criteria
+
+For each PMC integration:
+- [ ] **Data Completeness**: 95%+ resident data coverage
+- [ ] **Real-time Sync**: < 24 hour data latency
+- [ ] **Activation Ready**: Email campaigns functional
+- [ ] **PM Dashboard**: Property manager reporting accurate
+
+### 19.3 Technical Requirements
+
+Each PMC integration will follow the same architectural pattern as Yardi:
+1. **API Integration**: Snowflake Stored Procedures for data extraction
+2. **Modeling**: Bronze → Silver → Gold data modeling approach
+3. **Activation**: Data leveraged for email campaigns and PM reporting
+
+---
+
+**Legend:**
+- ☑ Completed
+- ☐ Not Started
+- 🔄 In Progress
