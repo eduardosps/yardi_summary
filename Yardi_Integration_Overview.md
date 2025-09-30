@@ -2,7 +2,7 @@
 # Yardi Integration — Architecture & Activation Overview
 **Date:** September 29, 2025  
 **Owner:** Eduardo Salvador & Nick Fernandez
-**Audience:** Engineering, Data, Growth/Compliance, Leadership
+**Audience:** Engineering, Data, Growth/Solutions, Leadership
 
 ---
 
@@ -13,13 +13,13 @@
 - **Key model:** **`pet_screening_master_bridge`** = canonical way to **tie a user to a property** (via leases, share dates, user_access, etc.).
 - **Rules:** When Postgres lacks **move_out_date**, prefer **Hott Solutions’** move_out_date (if available) and **propagate** downstream.
 - **Activation (Yardi):** _No welcome email_. We **do** run **Non‑Compliance** after **7 days** from property go‑live; **31‑email cap** then **Responsibility hand‑off** to PMs. Also: **Household Draft** campaign (Mon/Wed/Fri) and **Pet Fee nudges** (resident pays pet fees but lacks a profile).
-- **PM comms:** Compliance Check‑in + PDF (with **mailto** and **archive_user_link** actions), Responsibility email, Value/Revenue email, Pet Fee report.
-- **Known gaps:** Pet fee SP needs performance tuning; finalize Yardi endpoint names; lease-reset logic for 31-email counter; ensure CDC deletes are honored end-to-end.
+- **PM comms:** Compliance Check‑in + PDF (with **mailto** and **user_does_no_longer_live_here_link** actions), Responsibility email, Value/Revenue email, Pet Fee report.
+- **Known gaps:** Pet fee SP needs performance tuning; finalize Yardi endpoint names; instead of archive unshare the profile; ensure CDC deletes are honored end-to-end within Postgres.
 
 ---
 
 ## 1) Context & Purpose
-We need a clear, **technical yet exec‑readable** view of how Yardi integrates with PetScreening data and how that data powers our activation & reporting. This doc is the **source‑of‑truth** for diagrams, rules, and where we’re taking screenshots for the deck/Miro.
+We need a clear, **technical yet exec‑readable** view of how Yardi integrates with PetScreening data and how that data powers our activation & reporting. This doc is the **source‑of‑truth** for diagrams, rules, and where we’re taking screenshots for the Presentation deck/Miro.
 
 **Deliverables from this doc:**
 1) Diagrams (L0–L3), 2) a shot list for screenshots, 3) the exact narrative for leadership, 4) open decisions & risks.
@@ -27,7 +27,6 @@ We need a clear, **technical yet exec‑readable** view of how Yardi integrates 
 ---
 
 ## 2) Level-0 Architecture (bird's-eye)
-Paste this Mermaid into Mermaid Live (or Miro w/ plug-in) to render.
 
 ```mermaid
 flowchart LR
@@ -52,7 +51,6 @@ Staging, Core, Reporting)]
 
   subgraph Activation
     HT[Hightouch/Email Ops]
-    PMEM[PM Emails & PDFs]
     RPT[PM Reports/Dashboards]
   end
 
@@ -63,7 +61,6 @@ Staging, Core, Reporting)]
   YAPI --> SP --> RAW
 
   RAW --> STG --> HT
-  STG --> PMEM
   STG --> RPT
 ```
 **Narrative:** Old process: Yardi data enters Petscreening application via existing integration, data then leveraged in data warehouse layer. New additions: Hott data enters Snowflake **RAW** via **Airbyte**; Yardi data enters via a **Snowflake stored procedure** calling various API endpoints (residents + pet fees). dbt creates **1:1 staging** (bronze layer models) and then incorporates into **core/marts** (silver and gold layer models) for activation/reporting.
@@ -72,7 +69,7 @@ Staging, Core, Reporting)]
 
 ## 3) Data Sources (what & why)
 ### 3.1 Postgres (PetScreening App DB)
-- **Tables used (primary):** `users`, `leases`, `units`, `properties`, `property_managers`, `user_access` (names may vary; use actual schema names in screenshots).
+- **Tables used (primary):** `users`, `leases`, `units`, `pet_profiles`, `property_managers`, `user_access`.
 - **Strengths:** Near‑real‑time app truth for user/properties; rich user keys.
 - **Gaps:** Occasional **missing move_out_date** from yardi integration; no CDC.
 
@@ -95,15 +92,15 @@ Staging, Core, Reporting)]
 
 ## 4) Ingestion Layer
 ### 4.1 Airbyte
-- **Connectors:** Postgres → Snowflake, Hott → Snowflake (CDC).  
+- **Connectors:** Postgres → Snowflake, Hott → S3 → Snowflake (CDC).  
 - **Landing:** `RAW` schema (or `AIRBYTE` schema), partitioned by `_airbyte_extracted_at`.  
 - **Scheduling:** Daily + ad‑hoc backfills (add your exact cron for deck).  
 - **Quality hooks:** Row counts, _last seen_ timestamps, CDC checksum checks (if enabled).
 
 ### 4.2 Snowflake Stored Procedure (Residents API, Pet Fees API)
 - **Inputs:** Property/account scoping parameters, auth/keys (stored in secrets/parameters).  
-- **Outputs:** `raw.pmc_external_integrations.yardi_*` (e.g., `pet_fee_headers`, `pet_fee_lines`).  
-- **Schedule:** via **Task** or external orchestrator (document actual cadence).  
+- **Outputs:** `raw.pmc_external_integrations.st__yardi_*`.  
+- **Schedule:** via **Task** or **dbt** (TBD here but aiming for once a month for pet fees).  
 - **Perf:** Aim for **incremental pulls** (since last run); handle **rate limits**.
 
 ---
@@ -238,28 +235,28 @@ flowchart TD
 
 ### 6.3 Hightouch / Send engine
 - **Syncs:** one per campaign; filtered by `lease_include_in_email_flow`, `email_count`, `pays_pet_fees`, etc.  
-- **Schedules:** e.g., Non‑Compliance daily ~8:45 AM ET; Household Draft M/W/F; document exact cron.  
-- **Safety:** global unsubscribes, 31‑cap, suppressions (archived, moved out).
+- **Schedules:** e.g., Non‑Compliance daily ~8:45 AM ET; Household Draft M/W/F.  
+- **Safety:** global unsubscribes, 31‑cap, suppressions (moved out).
 
 ---
 
 ## 7) Property Manager Communications
-- **Compliance Check‑in (email + PDF):** Lists **recent move‑ins** missing profiles; includes **mailto** links and **archive_user_link** button per resident.  
-- **Responsibility Email (after 31):** “We’ve reached out 31 times; hand‑off to you.” Includes **email resident** + **archive** actions.  
-- **Value/Revenue Email:** Shows **revenue/value** generated.  
+- **Compliance Check‑in (email + PDF):** Lists **recent move‑ins** missing profiles; includes **mailto** links and **user_does_no_longer_live_here_link** button per resident.  
+- **Responsibility Email (after 31):** “We’ve reached out 31 times; hand‑off to you.” Includes **email resident** + **user_does_no_longer_live_here_link** actions.  
+- **Value/Revenue Email Prototype:** Shows **revenue/value** generated.  
 - **Pet Fee Report:** PM view of **who is/ isn’t paying fees** and whether they have a profile.
 
 **Action links to confirm:**
 - `mailto` prefilled template  
-- `archive_user_link` (recently added; include example link format)  
+- `archive_user_link` (recently added; need to change to user_does_no_longer_live_here_link)  
 - property/user deep links (internal admin UI)
 
 ---
 
 ## 8) Reporting & KPIs 
 - **Coverage:** % of Yardi residents with valid property assignment; **bridge completeness**.  
-- **Compliance:** Profile completion rate; time‑to‑complete.  
-- **Campaign:** Open/click rates, completion lift vs. control, **31‑cap %**.  
+- **Zendesk:** Less yardi complaints.  
+- **Campaign:** Open/click rates, completion test vs. holdout, **31‑cap %**.  
 - **Pet Fees:** # residents paying fees without profile; close rate after nudge.  
 - **Data Freshness:** Last extract times (Postgres, Hott, Yardi API).  
 - **Data Quality:** DQ failures (nulls on keys, FK breaks, duplicate leases).
@@ -271,7 +268,7 @@ flowchart TD
 - **Backfills:** How to backfill a property/date range safely.  
 - **On‑call:** Where alerts land; common failure causes; first checks (row counts, task status).  
 - **CDC Deletes:** How we materialize deletes downstream (soft‑delete flags vs hard delete).  
-- **Archival rules:** When we mark `is_archived_flag = true` (e.g., PM clicked archive).
+- **Archival rules:** When we mark `is_archived_flag = true` .
 
 ---
 
@@ -279,30 +276,36 @@ flowchart TD
 1) **Move‑out coalesce**: Using Hott’s `move_out_date` when Postgres is null → **standardized everywhere**.  
 2) **Pet Fee SP performance**: Batch, incremental since last successful run, add indexes, only necessary columns.  
 4) **CDC deletes**: Verify downstream **exclusions** (e.g., if a lease is deleted, ensure resident is suppressed).  
-5) **Welcome emails**: Remain disabled for Yardi unless PM requests opt‑in; evaluate legal/comms implications.  
-6) **Share date fallback**: Ensure we don’t over‑include users without leases; require minimum signals (share_date proximity to go‑live).
+5) **Welcome emails**: Remain disabled for Yardi unless we want to enable it and removde from platform (literally one line of sql); evaluate comms implications.
+6) Need to change archive to user_does_no_longer_live_here_link in responsability email.
+7) **Feedback**: Waiting to recieve complaints so we can triage it or if we missed anything.
 
 ---
 
 ## 11) Open Questions (fill during review)
-- Exact **Yardi API endpoint names** + field mapping (ask Thiago).  
-- Final **cron** times per job/sync.  
+- Exact **Yardi API endpoint names** + field mapping (meeting with Thiago tomorrow for this).  
+- Should we go and recreate this with other integrations.
+- Should we write into Postgres with the accurate lease data that we are missing.
+- Should we change or include any additional output.  
 
 ---
 
-## 12) Screenshot / Diagram Shot List (for deck/Miro)
-1) **Airbyte**: Postgres → Snowflake connector settings; Hott CDC stream showing deletes.  
-2) **Snowflake RAW**: Sample raw table (with `_airbyte_extracted_at`).  
-3) **dbt DAG**: Staging nodes → core → `pet_screening_master_bridge`.  
-4) **Model code**: Snippet showing `move_out_date` coalesce rule.  
-5) **Activation filters**: Hightouch or SQL driving Non‑Compliance & 31‑cap.  
-6) **Pet Fee SP**: excerpt of SP call logs / target tables.  
-7) **PM Emails**: Compliance Check‑in, Responsibility email, Value email, Pet Fee report.  
-8) **Action links**: `mailto` + `archive_user_link` example.
+## 12) Agenda / Diagram For Presentation (draft)
+1) TLDR What we have done and why it matters (Improve resident data, net new value proposition have pet fees data?)
+2) Older existing yardi where we started (architecture mermaid diagram) – Eduardo
+3) Find email complaint of user not living there for yardi – eduardo
+4) Issues which we found was status changes
+5) Limitations hott solutions coming in with cdc
+6) New Yardi (architecture diagram) – Eduardo
+7) Data Models and where new data plugs in – Nick
+8) Nuances from master bridge into email issues? – both
+9) What is it used for - outputs – Eduardo
+10) Lessons Learned/Next Steps – Nick (Pet fees we are currently only pinging the integrations where state=enabled which there a mismatch in postgres and snowflake ~100)
+
 
 ---
 
-## 13) Level‑1/2 Diagrams (data detail)
+## 13) Level‑1/2 Diagrams (data detail draft might need to change currently joining pet fees to units but exploring direct linkage to users tbd here)
 ### 13.1 Entity map
 ```mermaid
 erDiagram
@@ -327,29 +330,28 @@ graph LR
 ---
 
 ## 14) Appendix A — Key Fields (reference)
-- `property_live_date`: when integration went live for property.  
+- `property_go_live_date`: when integration went live for property.  
 - `lease_email_flow_trigger_date`: derived date to start Non‑Compliance.  
 - `lease_include_in_email_flow`: boolean gate for activation.  
 - `email_count`, `email_count_31_reached_at`: campaign counters.  
 - `move_out_date`: **coalesced** value (Hott > PG).  
-- `is_archived_flag`: excludes user from further emails; surfaced to PM.
+- `is_archived_flag`: excludes user from further emails.
 
 ---
 
 ## 15) Appendix B — Example Filters (SQL fragments)
 ```sql
 -- Eligible for Non-Compliance (Yardi):
-where provider = 'yardi'
-  and has_profile = false
+where  compliance_status = 'non_compliant'
   and property_live_date <= current_date - 7
   and coalesce(is_archived_flag,false) = false
-  and (email_count is null or email_count < 31)
+  and (email_count < 31 or email_reached_31_date is not null)
 ```
 
 ```sql
 -- Pet Fee Nudge target:
-where provider = 'yardi'
-  and has_profile = false
+where
+   has_profile = false
   and pays_pet_fees = true
 ```
 
@@ -357,28 +359,22 @@ where provider = 'yardi'
 
 ## 16) Appendix C — Governance & Owners
 - **Owners:** Nick, Eduardo.  
-- **dbt models:** Data team (Will, Nick, Eduardo, Christian).  
+- **dbt models:** Data team (Eduardo, Nick, Will, Christian).  
 - **Airbyte:** Data Eng (Eduardo, Will, Nick).  
 - **Pet Fee SP:** Thiago, Nick, Will — performance + keys.  
 - **Email Ops:** Andy, Eduardo, Christian.
+- **Reporting:** Beau, Nick, Andrew, Jacob.
 
 ---
 
-## 17) Miro Board Layout (frames)
-1) **L0 Diagram** (Sources→Ingestion→Warehouse→Activation).  
-2) **Source Cards** (PG, Hott, Yardi API) with pros/cons.  
-3) **dbt Flow** (staging→core→bridge).  
-4) **Activation Flows** (Non‑Compliance, Pet Fees, Household Draft).  
-5) **PM Comms** (screenshots + action link notes).  
-6) **KPIs** & **Runbook**.  
-7) **Risks/Decisions/Questions** (interactive sticky area).
+## 17) Miro Board Output (in progress)
+1) https://miro.com/app/board/uXjVJBDE5zg=/
 
 ---
 
 ## 18) Next Steps
-- Fill endpoint names + add a short mapping table for Pet Fee fields.  
+- Create presentation.
 - Grab the screenshots on the shot list and drop into the deck/Miro.  
-- Decide lease‑reset rule for 31‑cap; implement & test.  
 - Schedule SP improvements and document cron for all jobs.
 
 ---
