@@ -7,14 +7,14 @@
 ---
 
 ## 0) TL;DR (one‑pager)
-- **Goal:** Centralize Yardi data (plus Postgres + Hott Solutions + Yardi APIs) in Snowflake, model it with dbt, and **activate** it (emails/ops) while keeping property managers informed.
-- **Source systems:** Postgres (core app), **Hott Solutions** (CDC w/ deletes), **Yardi API** (pet fee endpoints).
+- **Goal:** Centralize Yardi data (plus Postgres + Hott Solutions + Yardi APIs) in Snowflake, model it with dbt, and **activate** it (emails/ops/reporting) while keeping property managers informed.
+- **Source systems:** Postgres (core app), **Hott Solutions** (CDC w/ deletes), **Yardi API** (resident + pet fee endpoints).
 - **Pipelines:** Airbyte → Snowflake (raw) → dbt (staging → core/marts).
 - **Key model:** **`pet_screening_master_bridge`** = canonical way to **tie a user to a property** (via leases, share dates, user_access, etc.).
 - **Rules:** When Postgres lacks **move_out_date**, prefer **Hott Solutions’** move_out_date (if available) and **propagate** downstream.
 - **Activation (Yardi):** _No welcome email_. We **do** run **Non‑Compliance** after **7 days** from property go‑live; **31‑email cap** then **Responsibility hand‑off** to PMs. Also: **Household Draft** campaign (Mon/Wed/Fri) and **Pet Fee nudges** (resident pays pet fees but lacks a profile).
 - **PM comms:** Compliance Check‑in + PDF (with **mailto** and **archive_user_link** actions), Responsibility email, Value/Revenue email, Pet Fee report.
-- **Known gaps:** Pet fee SP needs perf tuning; finalize Yardi endpoint names; lease‑reset logic for 31‑email counter; ensure CDC deletes are honored end‑to‑end.
+- **Known gaps:** Pet fee SP needs performance tuning; finalize Yardi endpoint names; lease-reset logic for 31-email counter; ensure CDC deletes are honored end-to-end.
 
 ---
 
@@ -26,8 +26,8 @@ We need a clear, **technical yet exec‑readable** view of how Yardi integrates 
 
 ---
 
-## 2) Level‑0 Architecture (birds‑eye)
-Paste this Mermaid into Mermaid Live (or Miro w/ plug‑in) to render.
+## 2) Level-0 Architecture (bird's-eye)
+Paste this Mermaid into Mermaid Live (or Miro w/ plug-in) to render.
 
 ```mermaid
 flowchart LR
@@ -79,7 +79,12 @@ Pet Fee Endpoints)]
 - **Value:** **Reliable move_out_date**, explicit **deletes** via CDC streams.
 - **Rule:** If Postgres **move_out_date is NULL**, **use Hott’s** value.
 
-### 3.3 Yardi API (Pet Fee endpoints)
+### 3.3 Yardi API (Resident endpoints)
+- **Purpose:** Determine current residents in Yardi, utilize to augment PS resident data.
+- **Mechanism:** **Snowflake Stored Procedure** (Nick) fetches and writes into Snowflake weekly (single table with primary residents + secondary occupants).
+- **Optimization need:** Improve SP runtime; Yardi SOAP API takes a long time to request.
+
+### 3.4 Yardi API (Pet Fee endpoints)
 - **Purpose:** Know **who is being charged pet fees** in Yardi, compare against PetScreening profiles for targets.
 - **Mechanism:** **Snowflake Stored Procedure** (Thiago) fetches and writes into Snowflake (two fee tables).
 - **Optimization need:** Improve SP runtime & idempotency (batching, pagination, slim columns).
@@ -93,9 +98,9 @@ Pet Fee Endpoints)]
 - **Scheduling:** Daily + ad‑hoc backfills (add your exact cron for deck).  
 - **Quality hooks:** Row counts, _last seen_ timestamps, CDC checksum checks (if enabled).
 
-### 4.2 Pet Fee Stored Procedure (Snowflake)
+### 4.2 Snowflake Stored Procedure (Residents API, Pet Fees API)
 - **Inputs:** Property/account scoping parameters, auth/keys (stored in secrets/parameters).  
-- **Outputs:** `raw_yardi_pet_fees_*` (two tables: e.g., `pet_fee_headers`, `pet_fee_lines`).  
+- **Outputs:** `raw.pmc_external_integrations.yardi_*` (e.g., `pet_fee_headers`, `pet_fee_lines`).  
 - **Schedule:** via **Task** or external orchestrator (document actual cadence).  
 - **Perf:** Aim for **incremental pulls** (since last run); handle **rate limits**.
 
@@ -117,7 +122,7 @@ Pet Fee Endpoints)]
 - **`core__pet_fees`** from Yardi SP tables, normalized.
 
 ### 5.3 Master Bridge (canonical user↔property)
-> **Model:** `pet_screening_master_bridge`  
+> **Model:** `petscreening__user_properties_master_bridge`  
 **Purpose:** Deduplicate and unify **all ways** a user can link to a property.
 
 **Link paths (prioritized):**
@@ -188,10 +193,8 @@ flowchart TD
   C -- No --> X
   C -- Yes --> D[Enter Non-Compliance Flow]
   D --> E{{Email count < 31?}}
-  E -- Yes --> F[Send next email
-(Non-Compliance cadence)]
-  E -- No --> G[Responsibility Email to PM
-(stop resident emails)]
+  E -- Yes --> F["Send next email<br/>(Non-Compliance cadence)"]
+  E -- No --> G["Responsibility Email to PM<br/>(stop resident emails)"]
   D --> H{{Pays Pet Fees? (Yardi API)}}
   H -- Yes & No Profile --> I[Send Pet Fee Nudge]
 ```
@@ -227,7 +230,7 @@ flowchart TD
 ---
 
 ## 9) Operations & Runbook
-- **Schedules:** Airbyte pull windows; SP task cadence (1nce a month?); Hightouch syncs.  
+- **Schedules:** Airbyte pull windows; SP task cadence (once a month?); Hightouch syncs.  
 - **Backfills:** How to backfill a property/date range safely.  
 - **On‑call:** Where alerts land; common failure causes; first checks (row counts, task status).  
 - **CDC Deletes:** How we materialize deletes downstream (soft‑delete flags vs hard delete).  
@@ -316,7 +319,7 @@ where provider = 'yardi'
 ---
 
 ## 16) Appendix C — Governance & Owners
-- **Oweners:** Nick, Eduardo.  
+- **Owners:** Nick, Eduardo.  
 - **dbt models:** Data team (Will, Nick, Eduardo, Christian).  
 - **Airbyte:** Data Eng (Eduardo, Will, Nick).  
 - **Pet Fee SP:** Thiago, Nick, Will — performance + keys.  
