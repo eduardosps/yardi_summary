@@ -383,11 +383,19 @@ where provider = 'yardi'
 
 ---
 
-## 19) Next PMC Integrations Roadmap
+## 19) Yardi Lessons Learned
+Research into API endpoints and physical site visits by the data team led to several discoveries, forwarded to the product team here: https://petscreening.atlassian.net/wiki/x/BYDvH
+- Move-out dates: the existing PS integration misses many move out dates, because the resident status often immediately changes to "notice" or "past" when a move-out date is added, whereas the integration only gets data for residents in the "current" and "future" statuses. This causes us to believe some residents are still current, when in reality they moved out.
+- Tenant relationships: learned many occupants that appear to be roommates in PS are actually of a relationship that doesn't live there in reality - guarantors, minors, etc.
+- Overall picture of current residents: learned that the yardi GetResidents endpoint does accurately deliver the property's picture of current residents. The primary cause of misalignement with PS is missing move out dates; there are some other reasons, listed in the confluence page, such as a resident missing an email (therefore PS user creation fails).
+
+---
+
+## 20) Next PMC Integrations Roadmap
 
 After completing the Yardi integration, the following Property Management Companies (PMCs) are prioritized for integration. Each PMC offers different API endpoints that require their own code to accomodate.
 
-### 19.1 PMC Integration Status
+### 20.1 PMC Integration Status
 
 | PMC | API Endpoints | Status |
 |-----|---------------|--------|
@@ -400,7 +408,12 @@ After completing the Yardi integration, the following Property Management Compan
 | | petfees | 🔄 | |
 | **Buildium** | TBD | ☐ |
 
-### 19.2 Success Criteria
+**Legend:**
+- ☑ Completed
+- ☐ Not Started
+- 🔄 In Progress
+
+### 20.2 Success Criteria
 
 For each PMC integration:
 - [ ] **Data Completeness**: 95%+ resident data coverage
@@ -408,16 +421,9 @@ For each PMC integration:
 - [ ] **Activation Ready**: Email campaigns functional
 - [ ] **PM Dashboard**: Property manager reporting accurate
 
-### 19.3 Technical Requirements
+### 20.3 Technical Requirements
 
 Each PMC integration will follow the same architectural pattern as Yardi:
 1. **API Integration**: Snowflake Stored Procedures for data extraction
 2. **Modeling**: Bronze → Silver → Gold data modeling approach
 3. **Activation**: Data leveraged for email campaigns and PM reporting
-
----
-
-**Legend:**
-- ☑ Completed
-- ☐ Not Started
-- 🔄 In Progress
